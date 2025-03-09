@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Station Dashboard</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-blue-100">
+    <div class="container mx-auto px-4 py-8">
+        <h2 class="text-3xl font-bold text-white-600 mb-8 text-center">MQTT Weather Station </h2>
+        
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 max-w-4xl mx-auto">
+            <div class="bg-blue rounded-lg shadow-lg p-6 border-2 border-white-500">
+                <p class="text-gray-600">Temperature</p>
+                <div class="text-3xl font-bold text-gray-800">
+                    <span id="temp" class="data">--</span> °C
+                </div>
+            </div>
+            
+            <div class="bg-blue rounded-lg shadow-lg p-6 border-2 border-white-500">
+                <p class="text-gray-600">Humidity</p>
+                <div class="text-3xl font-bold text-gray-800">
+                    <span id="humidity" class="data">--</span> %
+                </div>
+            </div>
+        </div>
+
+      
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <div class="bg-blue rounded-lg shadow-lg p-6">
+                <h3 class="text-xl font-bold mb-4">Humidity vs Temperature Correlation</h3>
+                <div id="correlation-plot" class="w-full h-[400px]"></div>
+            </div>
+            
+            <div class="bg-blue rounded-lg shadow-lg p-6">
+                <h3 class="text-xl font-bold mb-4">Temperature & Humidity Over Time</h3>
+                <div id="time-series-plot" class="w-full h-[400px]"></div>
+            </div>
+            
+         
+        </div>
+    </div>
+
+    <script>
+        // Connect to the MQTT Broker
+        const mqttClient = mqtt.connect('ws://157.173.101.159:9001');
+        
+        mqttClient.on('connect', () => {
+            console.log("Connected to MQTT via WebSockets");
+            mqttClient.subscribe("/work_group_01/room_temp/temperature");
+            mqttClient.subscribe("/work_group_01/room_temp/humidity");
+        });
+
+        mqttClient.on('message', (topic, message) => {
+            console.log(`Received: ${topic} → ${message.toString()}`);
+            if (topic === "/work_group_01/room_temp/temperature") {
+                document.getElementById("temp").innerText = message.toString();
+            } else if (topic === "/work_group_01/room_temp/humidity") {
+                document.getElementById("humidity").innerText = message.toString();
+            }
+        });
+
+        // Normalize values between 0 and 1
+        function normalize(value, min, max) {
+            return (value - min) / (max - min);
+        }
+
+        function smoothData(data, windowSize = 5) {
+            const result = [];
+            for (let i = 0; i < data.length; i++) {
+                const start = Math.max(0, i - Math.floor(windowSize / 2));
+                const end = Math.min(data.length, i + Math.floor(windowSize / 2));
+                const windowValues = data.slice(start, end);
+                const avg = windowValues.reduce((a, b) => a + b, 0) / windowValues.length;
+                result.push(avg);
+            }
+            return result;
+        }
+
+        function updateStats() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(stats => {
+                    document.getElementById('total-readings').textContent = stats.total_readings || '0';
+                    
+                    const tempMin = stats.temperature.min || 0;
+                    const tempMax = stats.temperature.max || 0;
+                    const tempAvg = stats.temperature.avg || 0;
+                    document.getElementById('temp-range').textContent = 
+                        `${tempMin.toFixed(1)}°C - ${tempMax.toFixed(1)}°C (avg: ${tempAvg.toFixed(1)}°C)`;
+                    
+                    const humMin = stats.humidity.min || 0;
+                    const humMax = stats.humidity.max || 0;
+                    const humAvg = stats.humidity.avg || 0;
+                    document.getElementById('humidity-range').textContent = 
+                        `${humMin.toFixed(1)}% - ${humMax.toFixed(1)}% (avg: ${humAvg.toFixed(1)}%)`;
+                })
+                .catch(error => {
+                    console.error('Error fetching stats:', error);
+                    document.getElementById('total-readings').textContent = '0';
+                    document.getElementById('temp-range').textContent = '0°C - 0°C (avg: 0°C)';
+                    document.getElementById('humidity-range').textContent = '0% - 0% (avg: 0%)';
+                });
+        }
+
+        function updateVisualization() {
+            Promise.all([
+                fetch('/api/data').then(response => response.json()),
+                fetch('/api/stats').then(response => response.json())
+            ]).then(([data, stats]) => {
+                // Filter and sort data
+                const validData = data.filter(d => d.temperature != null && d.humidity != null);
+                const timeSeriesData = [...validData].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+                // Get min/max values for normalization
+                const tempMin = Math.min(...timeSeriesData.map(d => d.temperature));
+                const tempMax = Math.max(...timeSeriesData.map(d => d.temperature));
+                const humMin = Math.min(...timeSeriesData.map(d => d.humidity));
+                const humMax = Math.max(...timeSeriesData.map(d => d.humidity));
+
+                // Prepare normalized and smoothed data
+                const temperatures = timeSeriesData.map(d => d.temperature);
+                const humidities = timeSeriesData.map(d => d.humidity);
+                
+                const normalizedTemps = temperatures.map(t => normalize(t, tempMin, tempMax));
+                const normalizedHumidity = humidities.map(h => normalize(h, humMin, humMax));
+                
+                const smoothedTemps = smoothData(normalizedTemps);
+                const smoothedHumidity = smoothData(normalizedHumidity);
+
+                // Time Series Plot
+                const timeSeriesTraces = [
+                    {
+                        x: timeSeriesData.map(d => new Date(d.timestamp)),
+                        y: smoothedTemps,
+                        name: 'Temperature (Normalized)',
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { 
+                            color: 'green',
+                            width: 3,
+                            shape: 'spline',
+                            smoothing: 1.3
+                        }
+                    },
+                    {
+                        x: timeSeriesData.map(d => new Date(d.timestamp)),
+                        y: smoothedHumidity,
+                        name: 'Humidity (Normalized)',
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { 
+                            color: 'red',
+                            width: 3,
+                            shape: 'spline',
+                            smoothing: 1.3
+                        }
+                    }
+                ];
+
+                const timeSeriesLayout = {
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    xaxis: { 
+                        title: 'Time',
+                        gridcolor: 'purple',
+                        type: 'date'
+                    },
+                    yaxis: { 
+                        title: 'Normalized Value (0-1)',
+                        gridcolor: 'purple',
+                        range: [-0.1, 1.1],  // Add some padding
+                        tickformat: '.2f'
+                    },
+                    margin: { t: 20, r: 40, b: 40, l: 60 },
+                    showlegend: true,
+                    legend: {
+                        x: 0,
+                        y: 1.2,
+                        orientation: 'h'
+                    },
+                    hovermode: 'x unified',
+                    hoverlabel: {
+                        bgcolor: '#FFF',
+                        font: { family: 'Arial', size: 12 }
+                    }
+                };
+
+                // Correlation Plot with smoothed line
+                const correlationTrace = {
+                    x: temperatures,
+                    y: humidities,
+                    mode: 'lines+markers',
+                    type: 'scatter',
+                    name: 'Humidity vs Temperature',
+                    line: {
+                        color: 'orange',
+                        width: 3,
+                        shape: 'spline',
+                        smoothing: 1.3
+                    },
+                    marker: {
+                        size: 6,
+                        color: 'orange',
+                        opacity: 0.5
+                    }
+                };
+
+                const correlationLayout = {
+                    paper_bgcolor: 'rgba(0,0,0,0)',
+                    plot_bgcolor: 'rgba(0,0,0,0)',
+                    xaxis: { 
+                        title: 'Temperature (°C)',
+                        gridcolor: 'orange',
+                        zeroline: false
+                    },
+                    yaxis: { 
+                        title: 'Humidity (%)',
+                        gridcolor: 'orange',
+                        zeroline: false
+                    },
+                    margin: { t: 20, r: 40, b: 40, l: 60 },
+                    showlegend: false,
+                    hovermode: 'closest',
+                    hoverlabel: {
+                        bgcolor: '#FFF',
+                        bordercolor: 'orange',
+                        font: { family: 'Arial', size: 12 }
+                    }
+                };
+
+                // Plot both graphs
+                Plotly.newPlot('time-series-plot', timeSeriesTraces, timeSeriesLayout);
+                Plotly.newPlot('correlation-plot', [correlationTrace], correlationLayout);
+
+                // Update measurements table
+                const tableBody = document.getElementById('measurements-table');
+                tableBody.innerHTML = data
+                    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+                    .map(reading => `
+                        <tr class="hover:bg-gray-50">
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                ${new Date(reading.timestamp).toLocaleString()}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                ${reading.temperature ? reading.temperature.toFixed(2) : '-'}
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                ${reading.humidity ? reading.humidity.toFixed(2) : '-'}
+                            </td>
+                        </tr>
+                    `).join('');
+
+                // Update stats
+                updateStats();
+            });
+        }
+
+        // Update more frequently for real-time feel
+        updateVisualization();
+        setInterval(updateVisualization, 10000); // Update every 10 seconds
+    </script>
+</body>
+</html>
